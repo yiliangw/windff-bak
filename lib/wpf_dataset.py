@@ -22,8 +22,7 @@ time_dict = _generate_time_dict()
 class WPFDataset(DGLDataset):
   def __init__(
       self,
-      data_path,
-      filename='wtbdata_245days.csv',
+      filepath,
       flag='train',
       size=None,
       capacity=134,
@@ -41,7 +40,9 @@ class WPFDataset(DGLDataset):
       binary=True,
   ):
 
-    super().__init__()
+    super().__init__('WPF Dataset')
+
+    self.filepath = filepath
     self.unit_size = day_len
     self.train_days = train_days
     self.points_per_hour = day_len // 24
@@ -65,8 +66,6 @@ class WPFDataset(DGLDataset):
     type_map = {'train': 0, 'val': 1, 'test': 2}
     self.set_type = type_map[flag]
     self.flag = flag
-    self.data_path = data_path
-    self.filename = filename
     self.graph_type = graph_type
     self.weight_adj_epsilon = weight_adj_epsilon
     self._logger = getLogger()
@@ -79,12 +78,16 @@ class WPFDataset(DGLDataset):
     self.graph = None
     self.data = None
 
-  def process(self):
+    self._read_data()
 
-    df_raw = pd.read_csv(os.path.join(self.data_path, self.filename))
+  def _read_data(self):
+
+    df_raw = pd.read_csv(self.filepath)
     cols = [c for c in df_raw.columns if 'Day' not in c and 'Tmstamp' not in c]
     df = df_raw[cols]
-    df['time'] = df_raw['Tmstamp'].apply(lambda x: time_dict[x])
+    # Add a time column by assigning
+    df.insert(0, 'time', df_raw['Tmstamp'].apply(lambda x: time_dict[x]))
+    # df['Time'] = df_raw['Tmstamp'].apply(lambda x: time_dict[x])
     df = df.sort_values('time')
     df = df.replace(to_replace=np.nan, value=0)
 
@@ -93,32 +96,39 @@ class WPFDataset(DGLDataset):
     turb_ids = sorted(turb_ids)
     self.turb_ids = turb_ids
 
-    feature_cols = [
+    feat_cols = [
         c for c in df.columns if 'Patv' not in c and 'time' not in c]
-    target_cols = ['Patv']
+    label_cols = ['Patv']
 
     # Get the data for each TurbID
-    features = np.zeros(len(turb_ids), df.shape[0], len(feature_cols))
-    targets = np.zeros(len(turb_ids), df.shape[0], len(target_cols))
+    assert df.shape[0] % len(turb_ids) == 0
+    num_time = df.shape[0] // len(turb_ids)
+    feat = torch.zeros(len(turb_ids), num_time,
+                       len(feat_cols), dtype=torch.float32)
+    label = torch.zeros(len(turb_ids), num_time,
+                        len(label_cols), dtype=torch.float32)
     for i, turb_id in enumerate(turb_ids):
       df_turb = df[df['TurbID'] == turb_id]
-      features[i] = df_turb[feature_cols].values.astype(np.float32)
-      targets[i] = df_turb[target_cols].values.astype(np.float32)
+      feat[i] = torch.tensor(df_turb[feat_cols].values)
+      label[i] = torch.tensor(df_turb[label_cols].values)
 
-    self.features = features
-    self.targets = targets
+    self.feat = feat
+    self.label = label
 
-    self.graph = dgl.graph(num_nodes=self.data_x.shape[0])
-
-    # Currently, use a fully connected graph, with dummy features
-    for u in self.graph.nodes():
-      for v in self.graph.nodes():
+    u_list = []
+    v_list = []
+    for u in range(len(turb_ids)):
+      for v in range(len(turb_ids)):
         if u != v:
-          self.graph.add_edge(u, v)
+          u_list.append(u)
+          v_list.append(v)
+
+    self.graph = dgl.graph((u_list, v_list), num_nodes=len(turb_ids))
+    # Currently, use a fully connected graph, with dummy features
     self.graph.edata['feat'] = torch.ones(self.graph.number_of_edges(), 1)
 
-    self.graph.ndata['feat'] = features
-    self.graph.ndata['target'] = targets
+    self.graph.ndata['feat'] = feat
+    self.graph.ndata['label'] = label
 
   def __getitem__(self, idx):
     # construct a dgl graph based on the edges of self.graph (dgl.graph)
